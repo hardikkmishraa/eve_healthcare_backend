@@ -10,6 +10,12 @@ EVE Healthcare provides a robust RESTful API that allows patients to explore dia
 
 Payment processing supports simulated gateways with configurable outcomes as well as external webhook updates. The webhook engine incorporates database-level row locking, an event deduplication store, and strict state machine rules to guarantee that payment events remain idempotent under network retries, out-of-order deliveries, and concurrent requests.
 
+## Demo
+
+A short walkthrough of the EVE Healthcare application covering authentication, diagnostic centres, test booking, simulated payments, and the backend API.
+
+[▶️ Watch the Demo](docs/demo/EVE_Healthcare_Demo.mp4)
+
 ---
 
 ## 2. Tech Stack
