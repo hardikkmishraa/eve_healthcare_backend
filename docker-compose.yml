@@ -1,0 +1,140 @@
+version: "3.9"
+
+# ─── Named Networks & Volumes ──────────────────────────────────────────────────
+networks:
+  eve_network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+
+# ─── Services ────────────────────────────────────────────────────────────────
+services:
+
+  # ── PostgreSQL 15 ───────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: eve_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: eve_healthcare
+      POSTGRES_USER: eve_user
+      POSTGRES_PASSWORD: eve_secret_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - eve_network
+    ports:
+      - "5433:5432"   # exposed on 5433 to avoid conflict with local PG
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eve_user -d eve_healthcare"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ── Redis 7 ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: eve_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    networks:
+      - eve_network
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ── FastAPI Application ──────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: eve_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://eve_user:eve_secret_password@postgres:5432/eve_healthcare
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-change-me-in-production-must-be-32-chars}
+      WEBHOOK_SECRET_KEY: ${WEBHOOK_SECRET_KEY:-webhook-secret-change-in-production}
+      ENABLE_WEBHOOK_HMAC: "false"
+      ENVIRONMENT: production
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
+      DEBUG: "false"
+    networks:
+      - eve_network
+    ports:
+      - "8000:8000"
+    command: >
+      sh -c "
+        python scripts/seed_db.py &&
+        uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 2
+      "
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ── Celery Worker ────────────────────────────────────────────────────────────
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: eve_celery_worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://eve_user:eve_secret_password@postgres:5432/eve_healthcare
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      ENVIRONMENT: production
+      LOG_FORMAT: json
+      LOG_LEVEL: INFO
+    networks:
+      - eve_network
+    command: celery -A app.worker.tasks.celery_app worker --loglevel=info --concurrency=2
+
+  # ── Celery Beat (Periodic Task Scheduler) ────────────────────────────────────
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    container_name: eve_celery_beat
+    restart: unless-stopped
+    depends_on:
+      - celery_worker
+    environment:
+      DATABASE_URL: postgresql://eve_user:eve_secret_password@postgres:5432/eve_healthcare
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      ENVIRONMENT: production
+      LOG_FORMAT: json
+    networks:
+      - eve_network
+    command: celery -A app.worker.tasks.celery_app beat --loglevel=info --schedule=/tmp/celerybeat-schedule
